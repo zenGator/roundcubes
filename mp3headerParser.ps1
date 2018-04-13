@@ -7,7 +7,8 @@ param ([string]$inFile = $pwd.Path +"\"+ 'test.mp3' ,
         [switch]$debugging ,
         [int]$skipto = 0,
         [string]$exceptions = $pwd.Path +"\"+ 'exceptions_log.txt',
-        [string]$errors = $pwd.Path +"\"+ 'error_log.txt'
+        [string]$errors = $pwd.Path +"\"+ 'error_log.txt',
+        [int]$stopat=0
          )
 $frameFlag=[system.Byte[]](0xFF,0xE0)
 
@@ -52,7 +53,7 @@ try {
     }
 catch {
     write-host $_
-    exit
+#    exit
     }
 
 
@@ -60,13 +61,15 @@ $lastelapsed=0
 $calcdFrameLen=0
 $lastCalcdFrameLen=0
 $nextFrameHeaderPosn=0
+$prevHeaderHex="0"
+$possibleFrameHeader=[byte]"00"
 $frameNumber=0
 $eof=$false
 
 write-Verbose ("processing " + $inFile )
 
 $bytes=[System.IO.File]::ReadAllBytes($inFile)
-Write-Verbose ("successfully read "+$bytes.Length+" from "+$inFile )
+Write-Verbose ("successfully read "+ $bytes.Length.ToString("N0") +" from "+$inFile )
 $startTime=(Get-date -Uformat %s)
 
 while ($myOffset -lt ($bytes.Length-4)) {    #no need to go to the VERY end . . .
@@ -88,8 +91,17 @@ while ($myOffset -lt ($bytes.Length-4)) {    #no need to go to the VERY end . . 
      $currentFrameHeadStart=$myOffset - 1 
      $currentFrameHeadEnd=$myOffset + 2
      $currentDataStart= $currentFrameHeadStart + 4
+
+     $prevHeaderHex = (($possibleFrameHeader | ForEach-Object ToString("X2")) -join '')
      $possibleFrameHeader=$bytes[ $currentFrameHeadStart .. $currentFrameHeadEnd ]  #MP3 frame headers are 4 bytes, beginning 0b1111 1111 111x x...x
 
+$myprevHeaderValue=([int64]("0x"+$prevHeaderHex))
+Write-debug ("prev: " + $prevHeaderHex + " => " + $myprevHeaderValue ) #([int64]("0x"+$prevHeaderHex))
+$myHex = (($possibleFrameHeader | ForEach-Object ToString("X2")) -join '') 
+$mycurrHeaderValue=([int64]("0x"+$myHex))
+Write-Debug ("start: " + $myHex + " => " + $buffer + " => " + $mycurrHeaderValue )  #([int64]("0x"+$myHex))
+
+if($mycurrHeaderValue -ne $myprevHeaderValue) {
      #now that we have a possible header, let's see what the different attributes are:
      #reference https://www.mp3-tech.org/programmer/frame_header.html for the lookup
      #starting with the MPEG version ID (bits 12 & 13 => 00011000 => 0x18 => 24)
@@ -205,6 +217,8 @@ if ($debugging) {
         $outStr="@{0,10} (#{1,8})`t calcdFrameLen ({2,2}) is too short; header: {3,12}" -f $currentFrameHeadStart,($frameNumber + 1),$calcdFrameLen,[string]($possibleFrameHeader | ForEach-Object ToString X2) 
         $exceptStream.WriteLine($outStr)
     }
+#Write-Host "calcdFrameLen: ", $calcdFrameLen
+
 #major debug
 #Write-Host $frameNumber  $currentFrameHeadStart $currentFrameHeadEnd $currentDataStart "offset:" $myOffset  (($bytes[($currentFrameHeadStart - 4) .. ($currentFrameHeadStart - 1) ]|ForEach-Object ToString("X2")) -join '')  (($possibleFrameHeader | ForEach-Object ToString("X2")) -join '') (($bytes[($currentFrameHeadEnd + 1) .. ($currentFrameHeadEnd + 4 ) ]|ForEach-Object ToString("X2")) -join '') 
 
@@ -213,30 +227,8 @@ if ($debugging) {
         $dbgStr+=", Calculated Frame Length: {0}bytes" -f $calcdFrameLen 
         $dbgStr+=", next frame header should be at: {0}" -f ($myOffset + $calcdFrameLen -1 )
         $dbgStr+=", will begin looking at {0}" -f ($myOffset + $calcdFrameLen - 3 )
-        write-debug $dbgStr
+        write-Debug $dbgStr
   
-$frameNumber++
-
-     #$outStr="Status:  currently at frame #{0}, offset {1}" -f  $framenumber, $myOffset; Write-Host $outStr
-     #exit
-
-    if ( $framenumber % (1024*4) -eq 0 ) { 
-        $outStr="Status:  currently at frame #{0}, offset {1}" -f  $framenumber, $currentframeheadstart 
-        $currTime=(Get-date -Uformat %s)
-        $lastElapsed=$elapsed
-        $elapsed=$currTime - $startTime
-        $sinceLast=($elapsed - $lastElapsed)
-        $outStr+="; {0} seconds elapsed ({1} since last update); current rate: {2} frames/second; {3} bytes/second" -f [int]$elapsed, [int]$sinceLast, [int]($frameNumber/$elapsed), [int]($myOffset/$elapsed)
-        Write-Verbose $outStr
-        }
-    if ( ( $currentFrameHeadStart ) -ne ($nextFrameHeaderPosn)) {
-    $outStr="Frameheader #{0,8} was expected at offset {1}, but was found at {2} (difference: {3}; prev header: {4})" -f $frameNumber, $nextFrameHeaderPosn,$currentFrameHeadStart,($currentFrameHeadStart-$nextFrameHeaderPosn),$prevHeaderHex
-    $exceptStream.WriteLine($outStr)
-#        Write-Host -Separator "" "@ Frameheader #" ($frameNumber + 1) " was expected at "$nextFrameHeaderPosn" (last len:" $lastCalcdFrameLen "), but found at " ($myOffset - 1)
-        }
-    $nextFrameHeaderPosn=($myOffset + $calcdFrameLen -2 )
-
-#need to add these members:
       #we could move on to the next frame header now, but first let's complete what we have re the current one
       #the next bit is pretty much irrelevant:
 	 #private bit (bit 24 => 00000001 => 0x01 => 1 )
@@ -257,6 +249,7 @@ $frameNumber++
      $outObj = New-Object -TypeName psobject    
 
      $outObj | Add-Member -MemberType NoteProperty -Name offset -value ("0x"+([convert]::ToString(($myOffset - 1),16).padleft(8,'0') )) -PassThru |
+             Add-Member -MemberType NoteProperty -Name decOffset -value ($myOffset - 1) -PassThru |
              Add-Member -MemberType NoteProperty -Name frameNumber -Value $frameNumber -PassThru |
              Add-Member -MemberType NoteProperty -Name headerBytes -Value $possibleFrameHeader -PassThru |
              Add-Member -MemberType NoteProperty -Name headerHex -Value (($possibleFrameHeader | ForEach-Object ToString("X2")) -join '') -PassThru |
@@ -269,7 +262,6 @@ $frameNumber++
              Add-Member -MemberType NoteProperty -Name calcdFrameLen -Value $calcdFrameLen  -PassThru |
              Add-Member -MemberType NoteProperty -Name privateBit -Value $privateBit -PassThru |
              Add-Member -MemberType NoteProperty -Name channelStr -Value $channelStr
-    $prevHeaderHex = (($possibleFrameHeader | ForEach-Object ToString("X2")) -join '')
 
 #Write-Host $myOffset ":"  (($possibleFrameHeader | ForEach-Object ToString("X2")) -join '')
 
@@ -310,15 +302,61 @@ $frameNumber++
          Add-Member -MemberType NoteProperty -Name originalbit -Value $originalbit -PassThru |
          Add-Member -MemberType NoteProperty -Name emphasisStr -Value $emphasisStr
 
+}
+
+$frameNumber++
+
+if ( ( $currentFrameHeadStart ) -ne ($nextFrameHeaderPosn)) {
+    $outStr="Frameheader #{0,8} was expected at offset {1}, but was found at {2} (difference: {3}; prev header: {4})" -f $frameNumber, $nextFrameHeaderPosn ,$currentFrameHeadStart,($currentFrameHeadStart-$nextFrameHeaderPosn),$prevHeaderHex
+try{    $exceptStream.WriteLine($outStr)
+} catch {} #ToDo: remove try
+#        Write-Host -Separator "" "@ Frameheader #" ($frameNumber + 1) " was expected at "$nextFrameHeaderPosn" (last len:" $lastCalcdFrameLen "), but found at " ($myOffset - 1)
+        }
+
+#write-host "here; calcdFrameLen ", $calcdFrameLen
+#20180412-1540
+    $nextFrameHeaderPosn=($myOffset  + [int]$calcdFrameLen -1 )
+
+#Write-verbose ("myoffset: {0}; nextFrameHeaderPosn: {1}" -f $myOffset, $nextFrameHeaderPosn)
+
+#write-host "here; nextframeheaderposn", $nextFrameHeaderPosn
+
+
+$outObj.frameNumber=$frameNumber
+$outObj.offset = ("0x"+([convert]::ToString(($myOffset - 1),16).padleft(8,'0') ))
+$outObj.decOffset = ($myOffset - 1)
+ 
+             
+
+     #$outStr="Status:  currently at frame #{0}, offset {1}" -f  $framenumber, $myOffset; Write-Host $outStr
+     #exit
+
+    if ( $framenumber % (1024*4) -eq 0 ) { 
+        $outStr="Status:  currently at frame #{0}, offset {1}" -f  $framenumber, $currentframeheadstart 
+        $currTime=(Get-date -Uformat %s)
+        $lastElapsed=$elapsed
+        $elapsed=$currTime - $startTime
+        $sinceLast=($elapsed - $lastElapsed)
+        $myByteRate=$myOffset/$elapsed
+        $myETA=($bytes.length - $myOffset)/($mybyterate)
+        $outStr+="; {0} seconds elapsed ({1} since last update); current rate: {2} frames/second; {3:N0} bytes/second => ETA: {4}" -f [int]$elapsed, [int]$sinceLast, [int]($frameNumber/$elapsed), [int]($mybyterate), [int]($myETA)
+        Write-Verbose $outStr
+        }
+
       #if (!$debugging){
+#write-verbose "writing output"
              Write-Output $outObj
        #      }
 
 #Write-Host "at offset" $myOffset "moving to" [int]( $myoffset + $calcdFrameLen - 4 )
-      $myOffset+= [int]($calcdFrameLen - 4)   #let's move to just a bit before where we think we should be
-#     Write-Host $myOffset
+      $myOffset= ($nextFrameHeaderPosn - 4)   #let's move to just a bit before where we think we should be
+
+#     Write-Verbose ( "changing myoffset to {0} and starting search again" -f $myOffset )
+
 #2013.04.09
 #    $myHex=($outobj."headerHex")
+
+#here we're creating a counter for each different frame header value
    $myHex=(($possibleFrameHeader | ForEach-Object ToString("X2")) -join '')
 #        write-host "hashkey of " $myHex 
     if(!$summary[$myHex]){ 
@@ -337,8 +375,9 @@ $frameNumber++
 #    $_ | Out-File -Append .\errorlogs.txt
     }
  #>
+ if ( ( $stopat -gt 0 ) -and ( $frameNumber -ge $stopat ) ) {break}
 }
 
-$summary.GetEnumerator() | foreach-object { Write-Host $_.Key, $_.Value}
+$summary.GetEnumerator() | foreach-object { Write-Host -Separator "" $_.Key, ": " , $_.Value}
 $exceptStream.close()
 $errorLog.close()
